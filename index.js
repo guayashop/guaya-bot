@@ -24,6 +24,7 @@ app.use(cors());
 
 // --- CONFIGURATION ---
 const TOKEN = process.env.DISCORD_TOKEN;
+console.log("TEST DU TOKEN :", TOKEN ? `Longueur: ${TOKEN.length} | Début: ${TOKEN.substring(0, 5)}` : "AUCUN TOKEN DÉTECTÉ (UNDEFINED)");
 const GUILD_ID = '1546527956959105126';
 const SALON_ANNONCES_ID = '1546527958695411758';
 const CATEGORY_TICKETS_ID = '1547371253588037694';
