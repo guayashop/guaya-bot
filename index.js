@@ -60,7 +60,7 @@ app.get('/', (req, res) => {
   res.send('API Guaya Bot active !');
 });
 
-// Endpoint OAuth Discord
+// Endpoint OAuth Discord avec ajout automatique au serveur
 app.get('/api/auth/discord/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send('Code manquant');
@@ -85,6 +85,19 @@ app.get('/api/auth/discord/callback', async (req, res) => {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
     });
     const userData = await userResponse.json();
+
+    // AJOUT DU MEMBRE SUR LE SERVEUR
+    try {
+      const guild = client.guilds.cache.get(GUILD_ID);
+      if (guild) {
+        await guild.members.add(userData.id, {
+          accessToken: tokenData.access_token
+        });
+        console.log(`Utilisateur ${userData.username} (${userData.id}) ajouté ou déjà présent sur le serveur.`);
+      }
+    } catch (joinErr) {
+      console.warn("Impossible d'ajouter automatiquement le membre au serveur :", joinErr.message);
+    }
 
     // Redirection vers ton site Vercel
     res.redirect(`https://guaya-shop.vercel.app/?discord_id=${userData.id}&discord_name=${encodeURIComponent(userData.username)}`);
@@ -126,7 +139,7 @@ async function handleTicketCreation(req, res) {
 
     const ticketChannel = await guild.channels.create(channelOptions);
 
-    // 2. Attribution des permissions après création (évite le bug de cache)
+    // 2. Attribution des permissions après création
     try {
       // Masquer le salon pour tout le monde
       await ticketChannel.permissionOverwrites.edit(guild.roles.everyone, {
@@ -141,7 +154,7 @@ async function handleTicketCreation(req, res) {
         AttachFiles: true
       });
 
-      // Donner l'accès au client Discord s'il est sur le serveur
+      // Donner l'accès au client Discord
       if (discordId) {
         const member = await guild.members.fetch(discordId).catch(() => null);
         if (member) {
