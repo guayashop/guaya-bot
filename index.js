@@ -23,7 +23,7 @@ app.use(express.json());
 app.use(cors());
 
 // --- CONFIGURATION ---
-const TOKEN = 'GYpbWCXs6zZvLK-W5EI8wyA102y2SF_7';
+const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = '1546527956959105126';
 const SALON_ANNONCES_ID = '1546527958695411758';
 const CATEGORY_TICKETS_ID = '1547371253588037694';
