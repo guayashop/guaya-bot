@@ -10,7 +10,10 @@ const {
   TextInputStyle,
   EmbedBuilder,
   ChannelType,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require('discord.js');
 const { Resend } = require('resend');
 const express = require('express');
@@ -51,8 +54,102 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-client.once('ready', () => {
+// Enregistrement de la commande /close au démarrage
+client.once('ready', async () => {
   console.log(`Bot Guaya Shop connecté : ${client.user.tag}`);
+
+  const commands = [
+    new SlashCommandBuilder()
+      .setName('close')
+      .setDescription('Ferme la vente en cours, poste le récapitulatif et supprime le ticket')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
+  ];
+
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+  try {
+    await rest.put(
+      Routes.applicationGuildCommands(client.user.id, GUILD_ID),
+      { body: commands }
+    );
+    console.log('Slash command /close enregistrée sur le serveur.');
+  } catch (err) {
+    console.error('Erreur enregistrement commande /close :', err);
+  }
+});
+
+// --- GESTION DES COMMANDES (INTERACTIONS) ---
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (interaction.commandName === 'close') {
+    // Évite l'erreur "L'application ne répond plus"
+    await interaction.deferReply({ ephemeral: true });
+
+    const channel = interaction.channel;
+
+    // Vérifie qu'on est bien dans un salon ticket
+    if (!channel.name.startsWith('cmd-')) {
+      return interaction.editReply({
+        content: 'Cette commande ne peut être utilisée que dans un salon ticket (`cmd-xxxx`).'
+      });
+    }
+
+    try {
+      // Récupération du premier message contenant l'embed de commande
+      const messages = await channel.messages.fetch({ limit: 50 });
+      const orderMessage = messages.reverse().find(msg => msg.embeds.length > 0);
+
+      let item = 'Non spécifié';
+      let orderId = channel.name.replace('cmd-', '');
+      let clientMention = 'Inconnu';
+      let price = '0 €';
+      let paymentMethod = 'Inconnu';
+
+      if (orderMessage && orderMessage.embeds[0]) {
+        const embed = orderMessage.embeds[0];
+        if (embed.title) item = embed.title.replace('🛒 Nouvelle commande : ', '');
+        embed.fields.forEach(field => {
+          if (field.name === 'Commande') orderId = field.value;
+          if (field.name === 'Client Discord') clientMention = field.value;
+          if (field.name === 'Montant') price = field.value;
+          if (field.name === 'Paiement') paymentMethod = field.value;
+        });
+      }
+
+      // Envoi du récapitulatif dans le salon d'annonces
+      const salonAnnonces = client.channels.cache.get(SALON_ANNONCES_ID);
+      if (salonAnnonces && salonAnnonces.isTextBased()) {
+        const recapEmbed = new EmbedBuilder()
+          .setTitle(`✅ Vente finalisée : ${item}`)
+          .setColor('#10b981')
+          .addFields(
+            { name: 'Commande', value: `${orderId}`, inline: true },
+            { name: 'Client', value: `${clientMention}`, inline: true },
+            { name: 'Montant', value: `${price}`, inline: true },
+            { name: 'Méthode', value: `${paymentMethod}`, inline: true },
+            { name: 'Validé par', value: `<@${interaction.user.id}>`, inline: true }
+          )
+          .setTimestamp();
+
+        await salonAnnonces.send({ embeds: [recapEmbed] });
+      }
+
+      await interaction.editReply({
+        content: 'Vente clôturée et postée dans les annonces. Suppression du ticket dans 3 secondes...'
+      });
+
+      // Suppression du ticket
+      setTimeout(async () => {
+        await channel.delete().catch(err => console.error('Erreur suppression salon :', err));
+      }, 3000);
+
+    } catch (err) {
+      console.error('Erreur /close :', err);
+      await interaction.editReply({
+        content: `Erreur lors de la fermeture : ${err.message}`
+      });
+    }
+  }
 });
 
 // --- ROUTES EXPRESS API ---
@@ -141,12 +238,10 @@ async function handleTicketCreation(req, res) {
 
     // 2. Attribution des permissions après création
     try {
-      // Masquer le salon pour tout le monde
       await ticketChannel.permissionOverwrites.edit(guild.roles.everyone, {
         ViewChannel: false
       });
 
-      // Donner l'accès au bot
       await ticketChannel.permissionOverwrites.edit(client.user.id, {
         ViewChannel: true,
         SendMessages: true,
@@ -154,7 +249,6 @@ async function handleTicketCreation(req, res) {
         AttachFiles: true
       });
 
-      // Donner l'accès au client Discord
       if (discordId) {
         const member = await guild.members.fetch(discordId).catch(() => null);
         if (member) {
@@ -209,7 +303,6 @@ async function handleTicketCreation(req, res) {
   }
 }
 
-// Support des deux routes pour le frontend
 app.post('/api/order', handleTicketCreation);
 app.post('/api/create-ticket', handleTicketCreation);
 
