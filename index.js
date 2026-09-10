@@ -24,6 +24,10 @@ app.use(cors());
 
 // --- CONFIGURATION ---
 const TOKEN = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
+const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const REDIRECT_URI = process.env.DISCORD_REDIRECT_URI || 'https://guaya-bot.onrender.com/api/auth/discord/callback';
+
 const GUILD_ID = '1546527956959105126';
 const SALON_ANNONCES_ID = '1546527958695411758';
 const CATEGORY_TICKETS_ID = '1547371253588037694';
@@ -56,28 +60,76 @@ app.get('/', (req, res) => {
   res.send('API Guaya Bot active !');
 });
 
+// Endpoint pour échanger le code OAuth Discord contre le profil utilisateur
+app.get('/api/auth/discord/callback', async (req, res) => {
+  const code = req.query.code;
+  if (!code) return res.status(400).send('Code manquant');
+
+  try {
+    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      body: new URLSearchParams({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code: code,
+        redirect_uri: REDIRECT_URI
+      }),
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok) throw new Error(tokenData.error_description || 'Erreur échange token');
+
+    const userResponse = await fetch('https://discord.com/api/users/@me', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const userData = await userResponse.json();
+
+    // Redirige vers le site Netlify avec les infos en paramètres d'URL
+    res.redirect(`https://guayashop.netlify.app/?discord_id=${userData.id}&discord_name=${encodeURIComponent(userData.username)}`);
+  } catch (err) {
+    console.error('Erreur OAuth Discord :', err);
+    res.status(500).send('Échec de la connexion Discord');
+  }
+});
+
 // Route d'achat / ticket
 app.post('/api/order', async (req, res) => {
   try {
-    const { email, item, price, paymentMethod, orderId } = req.body;
+    const { email, item, price, paymentMethod, orderId, discordId } = req.body;
     const guild = client.guilds.cache.get(GUILD_ID);
 
     if (!guild) {
       return res.status(500).json({ error: 'Serveur Discord introuvable' });
     }
 
-    // Création du salon ticket
     const channelName = `commande-${orderId || Date.now().toString().slice(-4)}`;
+    
+    // Permissions : visible par le bot, les admins, et le client Discord s'il est connecté
+    const permissionOverwrites = [
+      {
+        id: guild.id,
+        deny: [PermissionFlagsBits.ViewChannel]
+      },
+      {
+        id: client.user.id,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+      }
+    ];
+
+    if (discordId) {
+      permissionOverwrites.push({
+        id: discordId,
+        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
+      });
+    }
+
     const ticketChannel = await guild.channels.create({
       name: channelName,
       type: ChannelType.GuildText,
       parent: CATEGORY_TICKETS_ID,
-      permissionOverwrites: [
-        {
-          id: guild.id,
-          deny: [PermissionFlagsBits.ViewChannel]
-        }
-      ]
+      permissionOverwrites
     });
 
     const embed = new EmbedBuilder()
@@ -85,6 +137,7 @@ app.post('/api/order', async (req, res) => {
       .setColor('#5865F2')
       .addFields(
         { name: 'Client', value: email || 'Non spécifié', inline: true },
+        { name: 'Discord ID', value: discordId ? `<@${discordId}>` : 'Non relié', inline: true },
         { name: 'Montant', value: `${price} €`, inline: true },
         { name: 'Moyen de paiement', value: paymentMethod || 'Inconnu', inline: true }
       )
@@ -92,7 +145,6 @@ app.post('/api/order', async (req, res) => {
 
     await ticketChannel.send({ embeds: [embed] });
 
-    // Envoi de l'e-mail via Resend
     if (email) {
       await resend.emails.send({
         from: 'Guaya Shop <onboarding@resend.dev>',
@@ -114,5 +166,4 @@ app.listen(PORT, () => {
   console.log(`API Bot en ligne sur le port ${PORT}`);
 });
 
-// Connexion du bot avec la variable d'environnement
 client.login(TOKEN);
