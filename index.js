@@ -60,7 +60,7 @@ app.get('/', (req, res) => {
   res.send('API Guaya Bot active !');
 });
 
-// Endpoint pour échanger le code OAuth Discord contre le profil utilisateur
+// Endpoint OAuth Discord
 app.get('/api/auth/discord/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send('Code manquant');
@@ -79,87 +79,101 @@ app.get('/api/auth/discord/callback', async (req, res) => {
     });
 
     const tokenData = await tokenResponse.json();
-    if (!tokenResponse.ok) throw new Error(tokenData.error_description || 'Erreur échange token');
+    if (!tokenResponse.ok) throw new Error(tokenData.error_description || 'Erreur token');
 
     const userResponse = await fetch('https://discord.com/api/users/@me', {
       headers: { Authorization: `Bearer ${tokenData.access_token}` }
     });
     const userData = await userResponse.json();
 
-    // Redirige vers le site Netlify avec les infos en paramètres d'URL
     res.redirect(`https://guayashop.netlify.app/?discord_id=${userData.id}&discord_name=${encodeURIComponent(userData.username)}`);
   } catch (err) {
     console.error('Erreur OAuth Discord :', err);
-    res.status(500).send('Échec de la connexion Discord');
+    res.status(500).send('Échec connexion Discord');
   }
 });
 
-// Route d'achat / ticket
-app.post('/api/order', async (req, res) => {
+// Fonction universelle pour créer le ticket
+async function handleTicketCreation(req, res) {
+  console.log("-> Requête de commande reçue :", req.body);
   try {
-    const { email, item, price, paymentMethod, orderId, discordId } = req.body;
-    const guild = client.guilds.cache.get(GUILD_ID);
+    const data = req.body;
+    const email = data.email || data.user_email || 'Non spécifié';
+    const item = data.item || data.product || data.name || 'Produit';
+    const price = data.price || data.amount || '0';
+    const paymentMethod = data.paymentMethod || data.method || 'Inconnu';
+    const orderId = data.orderId || data.id || Date.now().toString().slice(-4);
+    const discordId = data.discordId || data.discord_id || null;
 
+    const guild = client.guilds.cache.get(GUILD_ID);
     if (!guild) {
+      console.error("Serveur introuvable ID:", GUILD_ID);
       return res.status(500).json({ error: 'Serveur Discord introuvable' });
     }
 
-    const channelName = `commande-${orderId || Date.now().toString().slice(-4)}`;
+    const channelName = `cmd-${orderId}`;
     
-    // Permissions : visible par le bot, les admins, et le client Discord s'il est connecté
-    const permissionOverwrites = [
-      {
-        id: guild.id,
-        deny: [PermissionFlagsBits.ViewChannel]
-      },
-      {
-        id: client.user.id,
-        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-      }
-    ];
+    // Création du salon
+    const channelOptions = {
+      name: channelName,
+      type: ChannelType.GuildText
+    };
 
-    if (discordId) {
-      permissionOverwrites.push({
-        id: discordId,
-        allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages]
-      });
+    if (CATEGORY_TICKETS_ID) {
+      channelOptions.parent = CATEGORY_TICKETS_ID;
     }
 
-    const ticketChannel = await guild.channels.create({
-      name: channelName,
-      type: ChannelType.GuildText,
-      parent: CATEGORY_TICKETS_ID,
-      permissionOverwrites
-    });
+    const ticketChannel = await guild.channels.create(channelOptions);
+
+    // Permissions si possible
+    try {
+      if (discordId) {
+        await ticketChannel.permissionOverwrites.edit(discordId, {
+          ViewChannel: true,
+          SendMessages: true
+        });
+      }
+    } catch (permErr) {
+      console.warn("Impossible d'ajouter les perms au membre :", permErr.message);
+    }
 
     const embed = new EmbedBuilder()
       .setTitle(`🛒 Nouvelle commande : ${item}`)
       .setColor('#5865F2')
       .addFields(
-        { name: 'Client', value: email || 'Non spécifié', inline: true },
-        { name: 'Discord ID', value: discordId ? `<@${discordId}>` : 'Non relié', inline: true },
+        { name: 'Client', value: `${email}`, inline: true },
+        { name: 'Discord', value: discordId ? `<@${discordId}>` : 'Non relié', inline: true },
         { name: 'Montant', value: `${price} €`, inline: true },
-        { name: 'Moyen de paiement', value: paymentMethod || 'Inconnu', inline: true }
+        { name: 'Paiement', value: `${paymentMethod}`, inline: true }
       )
       .setTimestamp();
 
-    await ticketChannel.send({ embeds: [embed] });
+    await ticketChannel.send({ content: discordId ? `<@${discordId}> voici votre commande !` : undefined, embeds: [embed] });
 
-    if (email) {
-      await resend.emails.send({
-        from: 'Guaya Shop <onboarding@resend.dev>',
-        to: email,
-        subject: `Confirmation de commande - ${item}`,
-        html: `<p>Bonjour,</p><p>Votre commande pour <strong>${item}</strong> (${price} €) a bien été prise en compte !</p><p>Rejoignez notre Discord pour récupérer votre produit via votre ticket.</p>`
-      });
+    if (email && email.includes('@')) {
+      try {
+        await resend.emails.send({
+          from: 'Guaya Shop <onboarding@resend.dev>',
+          to: email,
+          subject: `Confirmation de commande - ${item}`,
+          html: `<p>Votre commande pour <strong>${item}</strong> est validée. Un ticket a été créé sur notre Discord !</p>`
+        });
+      } catch (mailErr) {
+        console.warn("Erreur Resend :", mailErr.message);
+      }
     }
 
-    res.json({ success: true, channelId: ticketChannel.id });
+    console.log(`Ticket créé avec succès : #${channelName}`);
+    return res.json({ success: true, channelId: ticketChannel.id });
   } catch (err) {
-    console.error('Erreur commande :', err);
-    res.status(500).json({ error: err.message });
+    console.error('Erreur création ticket :', err);
+    return res.status(500).json({ error: err.message });
   }
-});
+}
+
+// Support des deux routes pour éviter toute incompatibilité avec le front
+app.post('/api/order', handleTicketCreation);
+app.post('/api/create-ticket', handleTicketCreation);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
