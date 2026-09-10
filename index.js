@@ -43,6 +43,49 @@ const BOT_API_URL = 'https://guaya-bot.onrender.com';
 const STOCK_FILE = path.join(__dirname, 'stock.json');
 const TECHS_FILE = path.join(__dirname, 'techs.json');
 
+// Helper pour lire le fichier techs.json
+function getTechsData() {
+  try {
+    if (fs.existsSync(TECHS_FILE)) {
+      const raw = fs.readFileSync(TECHS_FILE, 'utf-8');
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    console.error('Erreur lecture techs.json :', err);
+  }
+  return {};
+}
+
+// Fonction pour retrouver les infos de base du ticket depuis l'embed
+async function getTicketInfo(channel) {
+  const messages = await channel.messages.fetch({ limit: 50 });
+  const orderMessage = messages.reverse().find(msg => msg.embeds.length > 0);
+
+  let item = 'Produit';
+  let orderId = channel.name.replace('cmd-', '');
+  let clientMention = 'Non relié';
+  let clientDiscordId = null;
+  let price = '0 €';
+  let paymentMethod = 'Inconnu';
+
+  if (orderMessage && orderMessage.embeds[0]) {
+    const embed = orderMessage.embeds[0];
+    if (embed.title) item = embed.title.replace('🛒 Nouvelle commande : ', '');
+    embed.fields.forEach(field => {
+      if (field.name === 'Commande') orderId = field.value;
+      if (field.name === 'Client Discord') {
+        clientMention = field.value;
+        const match = clientMention.match(/<@(\d+)>/);
+        if (match) clientDiscordId = match[1];
+      }
+      if (field.name === 'Montant') price = field.value;
+      if (field.name === 'Paiement') paymentMethod = field.value;
+    });
+  }
+
+  return { item, orderId, clientMention, clientDiscordId, price, paymentMethod };
+}
+
 // --- CLIENT DISCORD ---
 const client = new Client({
   intents: [
@@ -54,14 +97,13 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-// Enregistrement de la commande /close au démarrage
 client.once('ready', async () => {
   console.log(`Bot Guaya Shop connecté : ${client.user.tag}`);
 
   const commands = [
     new SlashCommandBuilder()
       .setName('close')
-      .setDescription('Ferme la vente en cours, poste le récapitulatif et supprime le ticket')
+      .setDescription('Ferme la vente manuellement sans formulaire et supprime le ticket')
       .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels)
   ];
 
@@ -77,56 +119,64 @@ client.once('ready', async () => {
   }
 });
 
-// --- GESTION DES COMMANDES (INTERACTIONS) ---
+// --- GESTION DES INTERACTIONS ---
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  if (interaction.commandName === 'close') {
-    // Évite l'erreur "L'application ne répond plus"
-    await interaction.deferReply({ ephemeral: true });
-
+  // 1. Clic sur le bouton de validation / livraison
+  if (interaction.isButton() && interaction.customId === 'validate_and_deliver') {
     const channel = interaction.channel;
+    const ticketInfo = await getTicketInfo(channel);
+    const techs = getTechsData();
 
-    // Vérifie qu'on est bien dans un salon ticket
-    if (!channel.name.startsWith('cmd-')) {
-      return interaction.editReply({
-        content: 'Cette commande ne peut être utilisée que dans un salon ticket (`cmd-xxxx`).'
-      });
-    }
+    // Recherche d'une clé correspondante dans techs.json
+    const cleanItemName = ticketInfo.item.toLowerCase();
+    const matchedKey = Object.keys(techs).find(k => cleanItemName.includes(k.toLowerCase()));
 
-    try {
-      // Récupération du premier message contenant l'embed de commande
-      const messages = await channel.messages.fetch({ limit: 50 });
-      const orderMessage = messages.reverse().find(msg => msg.embeds.length > 0);
+    // CAS A : C'est une tech présente dans techs.json -> Envoi automatique direct
+    if (matchedKey) {
+      await interaction.deferReply({ ephemeral: true });
+      const techContent = techs[matchedKey];
 
-      let item = 'Non spécifié';
-      let orderId = channel.name.replace('cmd-', '');
-      let clientMention = 'Inconnu';
-      let price = '0 €';
-      let paymentMethod = 'Inconnu';
+      const techEmbed = new EmbedBuilder()
+        .setTitle(`📖 Ta méthode : ${ticketInfo.item}`)
+        .setColor('#10b981')
+        .setDescription(typeof techContent === 'string' ? techContent : JSON.stringify(techContent, null, 2))
+        .setFooter({ text: 'Merci pour ton achat chez Guaya Shop !' })
+        .setTimestamp();
 
-      if (orderMessage && orderMessage.embeds[0]) {
-        const embed = orderMessage.embeds[0];
-        if (embed.title) item = embed.title.replace('🛒 Nouvelle commande : ', '');
-        embed.fields.forEach(field => {
-          if (field.name === 'Commande') orderId = field.value;
-          if (field.name === 'Client Discord') clientMention = field.value;
-          if (field.name === 'Montant') price = field.value;
-          if (field.name === 'Paiement') paymentMethod = field.value;
-        });
+      // Envoi MP
+      let dmSent = false;
+      if (ticketInfo.clientDiscordId) {
+        try {
+          const member = await interaction.guild.members.fetch(ticketInfo.clientDiscordId);
+          if (member) {
+            await member.send({
+              content: `Ta commande **#${ticketInfo.orderId}** est validée ! Voici ta tech :`,
+              embeds: [techEmbed]
+            });
+            dmSent = true;
+          }
+        } catch (e) {
+          console.warn('MP fermé ou impossible :', e.message);
+        }
       }
 
-      // Envoi du récapitulatif dans le salon d'annonces
+      // Envoi dans le salon ticket
+      await channel.send({
+        content: ticketInfo.clientMention !== 'Non relié' ? `${ticketInfo.clientMention} Ta tech est prête !` : undefined,
+        embeds: [techEmbed]
+      });
+
+      // Annonce dans le salon des ventes
       const salonAnnonces = client.channels.cache.get(SALON_ANNONCES_ID);
       if (salonAnnonces && salonAnnonces.isTextBased()) {
         const recapEmbed = new EmbedBuilder()
-          .setTitle(`✅ Vente finalisée : ${item}`)
+          .setTitle(`✅ Vente finalisée : ${ticketInfo.item}`)
           .setColor('#10b981')
           .addFields(
-            { name: 'Commande', value: `${orderId}`, inline: true },
-            { name: 'Client', value: `${clientMention}`, inline: true },
-            { name: 'Montant', value: `${price}`, inline: true },
-            { name: 'Méthode', value: `${paymentMethod}`, inline: true },
+            { name: 'Commande', value: `${ticketInfo.orderId}`, inline: true },
+            { name: 'Client', value: `${ticketInfo.clientMention}`, inline: true },
+            { name: 'Montant', value: `${ticketInfo.price}`, inline: true },
+            { name: 'Méthode', value: `${ticketInfo.paymentMethod}`, inline: true },
             { name: 'Validé par', value: `<@${interaction.user.id}>`, inline: true }
           )
           .setTimestamp();
@@ -135,19 +185,158 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.editReply({
-        content: 'Vente clôturée et postée dans les annonces. Suppression du ticket dans 3 secondes...'
+        content: `Tech envoyée automatiquement depuis techs.json ! (MP : ${dmSent ? 'envoyé' : 'fermé/échoué'}). Suppression du ticket dans 5 secondes...`
       });
 
-      // Suppression du ticket
+      setTimeout(async () => {
+        await channel.delete().catch(err => console.error('Erreur suppression salon :', err));
+      }, 5000);
+
+      return;
+    }
+
+    // CAS B : Produit non répertorié dans techs.json (compte/abonnement classique) -> Ouverture du Modal
+    const modal = new ModalBuilder()
+      .setCustomId('deliver_modal')
+      .setTitle('Livraison des accès');
+
+    const usernameInput = new TextInputBuilder()
+      .setCustomId('account_user')
+      .setLabel('Identifiant / E-mail du compte')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('ex: client@gmail.com')
+      .setRequired(true);
+
+    const passwordInput = new TextInputBuilder()
+      .setCustomId('account_pass')
+      .setLabel('Mot de passe / Clé d’accès')
+      .setStyle(TextInputStyle.Short)
+      .setPlaceholder('ex: MotDePasse123')
+      .setRequired(true);
+
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(usernameInput),
+      new ActionRowBuilder().addComponents(passwordInput)
+    );
+
+    return await interaction.showModal(modal);
+  }
+
+  // 2. Soumission du formulaire modal pour les comptes à remplir à la main
+  if (interaction.isModalSubmit() && interaction.customId === 'deliver_modal') {
+    await interaction.deferReply({ ephemeral: true });
+
+    const channel = interaction.channel;
+    const accountUser = interaction.fields.getTextInputValue('account_user');
+    const accountPass = interaction.fields.getTextInputValue('account_pass');
+
+    try {
+      const ticketInfo = await getTicketInfo(channel);
+
+      const credsEmbed = new EmbedBuilder()
+        .setTitle(`🔑 Tes identifiants pour : ${ticketInfo.item}`)
+        .setColor('#10b981')
+        .addFields(
+          { name: 'Identifiant / E-mail', value: `\`\`\`${accountUser}\`\`\``, inline: false },
+          { name: 'Mot de passe / Clé', value: `\`\`\`${accountPass}\`\`\``, inline: false }
+        )
+        .setFooter({ text: 'Merci pour ton achat chez Guaya Shop !' })
+        .setTimestamp();
+
+      let dmSent = false;
+      if (ticketInfo.clientDiscordId) {
+        try {
+          const targetMember = await interaction.guild.members.fetch(ticketInfo.clientDiscordId);
+          if (targetMember) {
+            await targetMember.send({
+              content: `Ta commande **#${ticketInfo.orderId}** a été validée ! Voici tes accès :`,
+              embeds: [credsEmbed]
+            });
+            dmSent = true;
+          }
+        } catch (dmErr) {
+          console.warn('Impossible d’envoyer le MP :', dmErr.message);
+        }
+      }
+
+      await channel.send({
+        content: ticketInfo.clientMention !== 'Non relié' ? `${ticketInfo.clientMention} Votre commande a été validée !` : undefined,
+        embeds: [credsEmbed]
+      });
+
+      const salonAnnonces = client.channels.cache.get(SALON_ANNONCES_ID);
+      if (salonAnnonces && salonAnnonces.isTextBased()) {
+        const recapEmbed = new EmbedBuilder()
+          .setTitle(`✅ Vente finalisée : ${ticketInfo.item}`)
+          .setColor('#10b981')
+          .addFields(
+            { name: 'Commande', value: `${ticketInfo.orderId}`, inline: true },
+            { name: 'Client', value: `${ticketInfo.clientMention}`, inline: true },
+            { name: 'Montant', value: `${ticketInfo.price}`, inline: true },
+            { name: 'Méthode', value: `${ticketInfo.paymentMethod}`, inline: true },
+            { name: 'Validé par', value: `<@${interaction.user.id}>`, inline: true }
+          )
+          .setTimestamp();
+
+        await salonAnnonces.send({ embeds: [recapEmbed] });
+      }
+
+      await interaction.editReply({
+        content: `Commande livrée avec succès ! (MP : ${dmSent ? 'envoyé' : 'fermé/échoué'}). Suppression du ticket dans 5 secondes...`
+      });
+
+      setTimeout(async () => {
+        await channel.delete().catch(err => console.error('Erreur suppression salon :', err));
+      }, 5000);
+
+    } catch (err) {
+      console.error('Erreur livraison modal :', err);
+      await interaction.editReply({ content: `Erreur : ${err.message}` });
+    }
+  }
+
+  // 3. Fermeture manuelle avec /close
+  if (interaction.isChatInputCommand() && interaction.commandName === 'close') {
+    await interaction.deferReply({ ephemeral: true });
+    const channel = interaction.channel;
+
+    if (!channel.name.startsWith('cmd-')) {
+      return interaction.editReply({
+        content: 'Cette commande ne peut être utilisée que dans un salon ticket (`cmd-xxxx`).'
+      });
+    }
+
+    try {
+      const ticketInfo = await getTicketInfo(channel);
+
+      const salonAnnonces = client.channels.cache.get(SALON_ANNONCES_ID);
+      if (salonAnnonces && salonAnnonces.isTextBased()) {
+        const recapEmbed = new EmbedBuilder()
+          .setTitle(`✅ Vente clôturée : ${ticketInfo.item}`)
+          .setColor('#10b981')
+          .addFields(
+            { name: 'Commande', value: `${ticketInfo.orderId}`, inline: true },
+            { name: 'Client', value: `${ticketInfo.clientMention}`, inline: true },
+            { name: 'Montant', value: `${ticketInfo.price}`, inline: true },
+            { name: 'Méthode', value: `${ticketInfo.paymentMethod}`, inline: true },
+            { name: 'Validé par', value: `<@${interaction.user.id}>`, inline: true }
+          )
+          .setTimestamp();
+
+        await salonAnnonces.send({ embeds: [recapEmbed] });
+      }
+
+      await interaction.editReply({
+        content: 'Ticket clôturé manuellement. Suppression dans 3 secondes...'
+      });
+
       setTimeout(async () => {
         await channel.delete().catch(err => console.error('Erreur suppression salon :', err));
       }, 3000);
 
     } catch (err) {
       console.error('Erreur /close :', err);
-      await interaction.editReply({
-        content: `Erreur lors de la fermeture : ${err.message}`
-      });
+      await interaction.editReply({ content: `Erreur : ${err.message}` });
     }
   }
 });
@@ -157,7 +346,7 @@ app.get('/', (req, res) => {
   res.send('API Guaya Bot active !');
 });
 
-// Endpoint OAuth Discord avec ajout automatique au serveur
+// Endpoint OAuth Discord
 app.get('/api/auth/discord/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send('Code manquant');
@@ -183,7 +372,6 @@ app.get('/api/auth/discord/callback', async (req, res) => {
     });
     const userData = await userResponse.json();
 
-    // AJOUT DU MEMBRE SUR LE SERVEUR
     try {
       const guild = client.guilds.cache.get(GUILD_ID);
       if (guild) {
@@ -196,7 +384,6 @@ app.get('/api/auth/discord/callback', async (req, res) => {
       console.warn("Impossible d'ajouter automatiquement le membre au serveur :", joinErr.message);
     }
 
-    // Redirection vers ton site Vercel
     res.redirect(`https://guaya-shop.vercel.app/?discord_id=${userData.id}&discord_name=${encodeURIComponent(userData.username)}`);
   } catch (err) {
     console.error('Erreur OAuth Discord :', err);
@@ -263,7 +450,7 @@ async function handleTicketCreation(req, res) {
       console.warn("Avertissement perms :", permErr.message);
     }
 
-    // 3. Message de récapitulatif
+    // 3. Message de récapitulatif avec bouton
     const embed = new EmbedBuilder()
       .setTitle(`🛒 Nouvelle commande : ${item}`)
       .setColor('#d97706')
@@ -276,9 +463,17 @@ async function handleTicketCreation(req, res) {
       )
       .setTimestamp();
 
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('validate_and_deliver')
+        .setLabel('✅ Valider le paiement & Livrer')
+        .setStyle(ButtonStyle.Success)
+    );
+
     await ticketChannel.send({ 
       content: discordId ? `<@${discordId}> Bienvenue sur votre ticket de commande !` : undefined, 
-      embeds: [embed] 
+      embeds: [embed],
+      components: [row]
     });
 
     // 4. Envoi de l'e-mail Resend
