@@ -86,10 +86,11 @@ app.get('/api/auth/discord/callback', async (req, res) => {
     });
     const userData = await userResponse.json();
 
-    res.redirect(`https://guayashop.netlify.app/?discord_id=${userData.id}&discord_name=${encodeURIComponent(userData.username)}`);
+    // Redirection directe vers le site Vercel avec l'ID et le pseudo
+    res.redirect(`https://guaya-shop.vercel.app/?discord_id=${userData.id}&discord_name=${encodeURIComponent(userData.username)}`);
   } catch (err) {
     console.error('Erreur OAuth Discord :', err);
-    res.status(500).send('Échec connexion Discord');
+    res.status(500).send('Échec de la connexion Discord');
   }
 });
 
@@ -113,10 +114,38 @@ async function handleTicketCreation(req, res) {
 
     const channelName = `cmd-${orderId}`;
     
-    // Création du salon
+    // Permissions : salon privé (@everyone masqué, bot et client autorisés)
+    const permissionOverwrites = [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel]
+      },
+      {
+        id: client.user.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.EmbedLinks,
+          PermissionFlagsBits.AttachFiles
+        ]
+      }
+    ];
+
+    if (discordId) {
+      permissionOverwrites.push({
+        id: discordId,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory
+        ]
+      });
+    }
+
     const channelOptions = {
       name: channelName,
-      type: ChannelType.GuildText
+      type: ChannelType.GuildText,
+      permissionOverwrites
     };
 
     if (CATEGORY_TICKETS_ID) {
@@ -125,38 +154,30 @@ async function handleTicketCreation(req, res) {
 
     const ticketChannel = await guild.channels.create(channelOptions);
 
-    // Permissions si possible
-    try {
-      if (discordId) {
-        await ticketChannel.permissionOverwrites.edit(discordId, {
-          ViewChannel: true,
-          SendMessages: true
-        });
-      }
-    } catch (permErr) {
-      console.warn("Impossible d'ajouter les perms au membre :", permErr.message);
-    }
-
     const embed = new EmbedBuilder()
       .setTitle(`🛒 Nouvelle commande : ${item}`)
-      .setColor('#5865F2')
+      .setColor('#d97706')
       .addFields(
-        { name: 'Client', value: `${email}`, inline: true },
-        { name: 'Discord', value: discordId ? `<@${discordId}>` : 'Non relié', inline: true },
-        { name: 'Montant', value: `${price} €`, inline: true },
-        { name: 'Paiement', value: `${paymentMethod}`, inline: true }
+        { name: 'Commande', value: `#${orderId}`, inline: true },
+        { name: 'Client Discord', value: discordId ? `<@${discordId}>` : 'Non relié', inline: true },
+        { name: 'E-mail', value: `${email}`, inline: true },
+        { name: 'Montant total', value: `${price} €`, inline: true },
+        { name: 'Moyen de paiement', value: `${paymentMethod}`, inline: true }
       )
       .setTimestamp();
 
-    await ticketChannel.send({ content: discordId ? `<@${discordId}> voici votre commande !` : undefined, embeds: [embed] });
+    await ticketChannel.send({ 
+      content: discordId ? `<@${discordId}> Bienvenue sur votre ticket de commande !` : undefined, 
+      embeds: [embed] 
+    });
 
-    if (email && email.includes('@')) {
+    if (email && email.includes('@') && email !== 'Non spécifié') {
       try {
         await resend.emails.send({
           from: 'Guaya Shop <onboarding@resend.dev>',
           to: email,
-          subject: `Confirmation de commande - ${item}`,
-          html: `<p>Votre commande pour <strong>${item}</strong> est validée. Un ticket a été créé sur notre Discord !</p>`
+          subject: `Confirmation de commande #${orderId} - ${item}`,
+          html: `<p>Votre commande pour <strong>${item}</strong> (${price} €) est validée.</p><p>Votre salon ticket <strong>#${channelName}</strong> est ouvert sur notre serveur Discord pour finaliser la livraison.</p>`
         });
       } catch (mailErr) {
         console.warn("Erreur Resend :", mailErr.message);
@@ -171,7 +192,7 @@ async function handleTicketCreation(req, res) {
   }
 }
 
-// Support des deux routes pour éviter toute incompatibilité avec le front
+// Support des deux routes pour le frontend
 app.post('/api/order', handleTicketCreation);
 app.post('/api/create-ticket', handleTicketCreation);
 
