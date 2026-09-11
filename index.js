@@ -131,8 +131,11 @@ client.on('interactionCreate', async (interaction) => {
     const ticketInfo = await getTicketInfo(channel);
     const techs = getTechsData();
 
-    const cleanItemName = ticketInfo.item.toLowerCase();
-    const matchedKey = Object.keys(techs).find(k => cleanItemName.includes(k.toLowerCase()));
+    const cleanItemName = ticketInfo.item.toLowerCase().replace(/[^a-z0-9]/g, '');
+const matchedKey = Object.keys(techs).find(k => {
+  const cleanKey = k.toLowerCase().replace(/[^a-z0-9]/g, '');
+  return cleanItemName.includes(cleanKey) || cleanKey.includes(cleanItemName);
+});
 
     // CAS A : Méthode présente dans techs.json
     if (matchedKey) {
