@@ -43,7 +43,11 @@ const BOT_API_URL = 'https://guaya-bot.onrender.com';
 const STOCK_FILE = path.join(__dirname, 'stock.json');
 const TECHS_FILE = path.join(__dirname, 'techs.json');
 
-// Helper pour lire le fichier techs.json
+// --- SYSTÈME DE LIMITE DE TEMPS (COOLDOWN) ---
+const TICKET_COOLDOWN_MS = 60 * 1000;
+const lastTicketCreation = new Map();
+
+// Helper pour lire techs.json
 function getTechsData() {
   try {
     if (fs.existsSync(TECHS_FILE)) {
@@ -56,7 +60,7 @@ function getTechsData() {
   return {};
 }
 
-// Fonction pour retrouver les infos de base du ticket depuis l'embed
+// Helper pour extraire les données du ticket
 async function getTicketInfo(channel) {
   const messages = await channel.messages.fetch({ limit: 50 });
   const orderMessage = messages.reverse().find(msg => msg.embeds.length > 0);
@@ -121,17 +125,16 @@ client.once('ready', async () => {
 
 // --- GESTION DES INTERACTIONS ---
 client.on('interactionCreate', async (interaction) => {
-  // 1. Clic sur le bouton de validation / livraison
+  // 1. Bouton de validation & livraison
   if (interaction.isButton() && interaction.customId === 'validate_and_deliver') {
     const channel = interaction.channel;
     const ticketInfo = await getTicketInfo(channel);
     const techs = getTechsData();
 
-    // Recherche d'une clé correspondante dans techs.json
     const cleanItemName = ticketInfo.item.toLowerCase();
     const matchedKey = Object.keys(techs).find(k => cleanItemName.includes(k.toLowerCase()));
 
-    // CAS A : C'est une tech présente dans techs.json -> Envoi automatique direct
+    // CAS A : Méthode présente dans techs.json
     if (matchedKey) {
       await interaction.deferReply({ ephemeral: true });
       const techContent = techs[matchedKey];
@@ -143,7 +146,6 @@ client.on('interactionCreate', async (interaction) => {
         .setFooter({ text: 'Merci pour ton achat chez Guaya Shop !' })
         .setTimestamp();
 
-      // Envoi MP
       let dmSent = false;
       if (ticketInfo.clientDiscordId) {
         try {
@@ -160,13 +162,11 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
 
-      // Envoi dans le salon ticket
       await channel.send({
         content: ticketInfo.clientMention !== 'Non relié' ? `${ticketInfo.clientMention} Ta tech est prête !` : undefined,
         embeds: [techEmbed]
       });
 
-      // Annonce dans le salon des ventes
       const salonAnnonces = client.channels.cache.get(SALON_ANNONCES_ID);
       if (salonAnnonces && salonAnnonces.isTextBased()) {
         const recapEmbed = new EmbedBuilder()
@@ -195,7 +195,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // CAS B : Produit non répertorié dans techs.json (compte/abonnement classique) -> Ouverture du Modal
+    // CAS B : Compte à remplir manuellement
     const modal = new ModalBuilder()
       .setCustomId('deliver_modal')
       .setTitle('Livraison des accès');
@@ -222,7 +222,7 @@ client.on('interactionCreate', async (interaction) => {
     return await interaction.showModal(modal);
   }
 
-  // 2. Soumission du formulaire modal pour les comptes à remplir à la main
+  // 2. Soumission du modal pour identifiants manuels
   if (interaction.isModalSubmit() && interaction.customId === 'deliver_modal') {
     await interaction.deferReply({ ephemeral: true });
 
@@ -295,7 +295,7 @@ client.on('interactionCreate', async (interaction) => {
     }
   }
 
-  // 3. Fermeture manuelle avec /close
+  // 3. Commande /close
   if (interaction.isChatInputCommand() && interaction.commandName === 'close') {
     await interaction.deferReply({ ephemeral: true });
     const channel = interaction.channel;
@@ -346,7 +346,7 @@ app.get('/', (req, res) => {
   res.send('API Guaya Bot active !');
 });
 
-// Endpoint OAuth Discord
+// OAuth Callback Discord
 app.get('/api/auth/discord/callback', async (req, res) => {
   const code = req.query.code;
   if (!code) return res.status(400).send('Code manquant');
@@ -391,27 +391,47 @@ app.get('/api/auth/discord/callback', async (req, res) => {
   }
 });
 
-// Fonction universelle pour créer le ticket
+// Création de ticket avec limite de temps et rejet des tests factices
 async function handleTicketCreation(req, res) {
-  console.log("-> Requête de commande reçue :", req.body);
   try {
-    const data = req.body;
+    const data = req.body || {};
+    const discordId = data.discordId || data.discord_id || null;
+    const orderId = data.orderId || data.id || Date.now().toString().slice(-4);
+
+    // 1. Rejet automatique des fausses données de test
+    if (orderId === '9999' || orderId === 'G-9999' || discordId === '123456789012345678') {
+      console.warn('Requête de test factice bloquée.');
+      return res.status(400).json({ error: 'Fausse commande rejetée.' });
+    }
+
+    // 2. Cooldown de 60 secondes
+    const clientIdentifier = discordId || req.ip || req.headers['x-forwarded-for'] || 'default';
+    const now = Date.now();
+    const lastTime = lastTicketCreation.get(clientIdentifier) || 0;
+
+    if (now - lastTime < TICKET_COOLDOWN_MS) {
+      const remainingSeconds = Math.ceil((TICKET_COOLDOWN_MS - (now - lastTime)) / 1000);
+      console.warn(`Cooldown actif pour ${clientIdentifier}. Reste ${remainingSeconds}s.`);
+      return res.status(429).json({ 
+        error: `Merci de patienter ${remainingSeconds}s avant d'ouvrir un autre ticket.` 
+      });
+    }
+
+    lastTicketCreation.set(clientIdentifier, now);
+
     const email = data.email || data.user_email || 'Non spécifié';
     const item = data.item || data.product || data.name || 'Produit';
     const price = data.price || data.amount || '0';
     const paymentMethod = data.paymentMethod || data.method || 'Inconnu';
-    const orderId = data.orderId || data.id || Date.now().toString().slice(-4);
-    const discordId = data.discordId || data.discord_id || null;
 
     const guild = client.guilds.cache.get(GUILD_ID);
     if (!guild) {
-      console.error("Serveur introuvable ID:", GUILD_ID);
+      console.error('Serveur introuvable ID:', GUILD_ID);
       return res.status(500).json({ error: 'Serveur Discord introuvable' });
     }
 
     const channelName = `cmd-${orderId}`;
     
-    // 1. Création simple du salon
     const channelOptions = {
       name: channelName,
       type: ChannelType.GuildText
@@ -423,7 +443,6 @@ async function handleTicketCreation(req, res) {
 
     const ticketChannel = await guild.channels.create(channelOptions);
 
-    // 2. Attribution des permissions après création
     try {
       await ticketChannel.permissionOverwrites.edit(guild.roles.everyone, {
         ViewChannel: false
@@ -447,10 +466,9 @@ async function handleTicketCreation(req, res) {
         }
       }
     } catch (permErr) {
-      console.warn("Avertissement perms :", permErr.message);
+      console.warn('Avertissement perms :', permErr.message);
     }
 
-    // 3. Message de récapitulatif avec bouton
     const embed = new EmbedBuilder()
       .setTitle(`🛒 Nouvelle commande : ${item}`)
       .setColor('#d97706')
@@ -476,7 +494,6 @@ async function handleTicketCreation(req, res) {
       components: [row]
     });
 
-    // 4. Envoi de l'e-mail Resend
     if (email && email.includes('@') && email !== 'Non spécifié') {
       try {
         await resend.emails.send({
@@ -486,7 +503,7 @@ async function handleTicketCreation(req, res) {
           html: `<p>Votre commande pour <strong>${item}</strong> (${price} €) est validée. Un salon ticket a été créé sur notre Discord !</p>`
         });
       } catch (mailErr) {
-        console.warn("Erreur Resend :", mailErr.message);
+        console.warn('Erreur Resend :', mailErr.message);
       }
     }
 
